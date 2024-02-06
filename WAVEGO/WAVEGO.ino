@@ -64,14 +64,153 @@ int JSON_SEND_INTERVAL;
 #include "ServoCtrl.h"
 #include "PreferencesConfig.h"
 #include <ArduinoJson.h>
+// NEW by Z. Huang: include math library
+#include <math.h>
 
 StaticJsonDocument<200> docReceive;
 StaticJsonDocument<100> docSend;
 TaskHandle_t threadings;
 
+// NEW by Z. Huang: define the thread handler for sending IMU data
+TaskHandle_t handle_send_IMU_data;
+// NEW by Z. Huang: define the thread handler for calculating the pose
+TaskHandle_t handle_calculate_pose;
+
+// NEW by Z. Huang: define the global flag for deciding whether to start / stop sending IMU data
+// stop_sending = true -> does not send IMU data to RPi;
+// default: true.
+bool stop_sending = false;
+
+// NEW by Z. Huang: define the global flag for deciding whether to start calculating the IMU data
+// stop_calculating_imu = true -> does not update or calculate the pose
+bool stop_calculating_imu = true;
+// whether to use built-in pitch and roll algorithm 
+bool use_default_pitch_roll_algo = false;
+
+// NEW by Z. Huang: define the global flag of whether to print the readings through Serial
+// will not print results if connected to Rpi, default: false.
+bool print_debug = true;
+
 // placeHolders.
 void webServerInit();
 
+// NEW by Z. Huang: global flag for whether the sendIMU2Rpi is initiallized for the first time.
+bool have_never_sent = true;
+// NEW by Z. Huang: initialize the global IMU data to send.
+unsigned int current_stamp = 0, last_stamp = 0, last_stamp_sent = 0;
+float pitch_a = 0.0, pitch_g = 0.0, roll_a = 0.0, roll_g = 0.0, mag_x = 0.0, mag_y = 0.0;
+float dt_send, yaw_send, pitch_send, roll_send, x_send, y_send, z_send;
+
+// NEW by Z. Huang: define a function sendIMU2Rpi() to be an individial thread (task)
+// detect whether to send: 
+// initialized at setup(), never terminates
+// if send -> if first time: initialize the calculation thread;
+// if stop -> only terminate the sending module.
+// TODO: fix the problem that calculating is around 5 times faster than Serial.print().
+void sendIMU2Rpi(void *pvParameter){
+  if(print_debug){
+    // TODO: check if Serial.available()
+    Serial.println("Running sendIMU2Rpi...");
+  }
+  // looping to detect whether to send
+  while(true){
+    if(stop_sending == false){
+      if(have_never_sent == true){
+        // TODO: initialize the calculation thread.
+        stop_calculating_imu = false;
+        xTaskCreate(&calculatePose, "calculatePose", 4000, NULL, 5, &handle_calculate_pose);
+        have_never_sent = false;
+      }
+      // write the new data into serial, wait until channel available
+      if(current_stamp != last_stamp_sent){  // TODO: consider if two stamps is NOT continuous
+        docSend["stamp"] = current_stamp;
+        docSend["dt"] = dt_send;
+        docSend["yaw"] = yaw_send;
+        docSend["pitch"] = pitch_send;
+        docSend["roll"] = roll_send;
+        docSend["x"] = x_send;
+        docSend["y"] = y_send;
+        docSend["z"] = z_send;
+        /*
+        while(Serial.available() != true){
+          ;  // blank, wait until the channel is available
+        }
+        serializeJson(docSend, Serial);
+        */
+        last_stamp_sent = current_stamp;
+        if(print_debug){
+          /*
+          while(Serial.available() != true){
+            ;  // blank, wait until the channel is available
+          }*/
+          Serial.print("Calculated Pose: stamp[");
+          Serial.print(last_stamp_sent);
+          Serial.print("], dt[");
+          Serial.print(delta_time*1000);
+          Serial.print("]ms, Yaw[");
+          Serial.print(yaw_send);
+          Serial.print("]Deg, Pitch[");
+          Serial.print(pitch_send);
+          Serial.print("]Deg, Roll[");
+          Serial.print(roll_send);
+          Serial.print("]Deg, X[");
+          Serial.print(x_send);
+          Serial.print("]m, Y[");
+          Serial.print(y_send);
+          Serial.print("]m, Z[");
+          Serial.print(z_send);
+          Serial.print("]m, ");
+          Serial.print("mag_x[");
+          Serial.print(mag_x);
+          Serial.print("], mag_y[");
+          Serial.print(mag_y);
+          Serial.print("], MAG_X[");
+          Serial.print(MAG_X);
+          Serial.print("], MAG_Y[");
+          Serial.print(MAG_Y);
+          Serial.print("], MAG_Z[");
+          Serial.print(MAG_Z);
+          Serial.println("].");
+        }
+      }
+    }
+  }
+}
+
+void calculatePose(void *pvParameter){
+  if(print_debug){
+    // TODO: check if Serial.available()
+    Serial.println("Running calculatePose...");
+  }
+  // calculate the new pose using freshed IMU data
+  while(true){
+    if(use_default_pitch_roll_algo != true){
+      // get the corrected accelerations
+      accXYZUpdate();  // changes globals: corrected acc and gyro readings along the x, y, z axis, the raw magnetometer values, the delta_time and two time stamps.
+      pitch_a = atan2(ACC_Y, ACC_Z)*180/M_PI;
+      pitch_g += GYR_X*delta_time;  // variables updated from InitConfig.h
+      pitch_send = (pitch_send + GYR_X*delta_time)*0.9 + pitch_a*0.1;  // complementary filter
+      roll_a = atan2(ACC_X, ACC_Z)*180/M_PI;
+      roll_g += GYR_Y*delta_time;
+      roll_send = (roll_send + GYR_Y*delta_time)*0.9 + roll_a*0.1; // complementary filter
+      mag_x = MAG_Y*cos(roll_send*M_PI/180) - MAG_Z*sin(roll_send*M_PI/180);
+      mag_y = MAG_X*cos(pitch_send*M_PI/180) + MAG_Y*sin(roll_send*M_PI/180)*sin(pitch_send*M_PI/180);
+      yaw_send = atan2(mag_y,mag_x)*180/M_PI;
+      last_stamp = current_stamp;
+      current_stamp += 1;
+    }
+    else if(use_default_pitch_roll_algo == true){
+      accXYZUpdate(true);
+      pitch_send = pitch_default;
+      roll_send = roll_default;
+      mag_x = MAG_Y*cos(roll_send*M_PI/180) - MAG_Z*sin(roll_send*M_PI/180);
+      mag_y = MAG_X*cos(pitch_send*M_PI/180) + MAG_Y*sin(roll_send*M_PI/180)*sin(pitch_send*M_PI/180) + MAG_Z*cos(roll_send*M_PI/180)*sin(pitch_send*M_PI/180);
+      yaw_send = atan2(mag_y,mag_x)*180/M_PI;
+      last_stamp = current_stamp;
+      current_stamp += 1;
+    }
+  }
+}
 
 // var(variable), val(value).                  
 void serialCtrl(){
@@ -153,6 +292,24 @@ void serialCtrl(){
 
       else if(docReceive["var"] == "r4bSsid"){
         UPPER_RASP4B_SSID = docReceive["ip"].as<String>();
+      }
+
+      else if(docReceive["var"] == "IMU_send"){
+        // 1. send the calculated yaw, pitch, roll, x, y, z during the past period;
+        // 2. start calculating the IMU data, set an origin value
+        // data frame: {"stamp": unsigned int, "dt": float, "yaw": float, "pitch": float, "roll", float, "x": float, "y": float, "z": float}
+        // sending the IMU data in a constant time rate.
+        stop_sending = false;
+      }
+
+      else if(docReceive["var"] == "IMU_stop"){
+        // stop sending, but the IMU calculation goes on.
+        stop_sending = true;
+      }
+
+      else if(docReceive["var"] == "IMU_stop_cal"){
+        // stop calculating IMU data.
+        stop_calculating_imu = true;
       }
     }
 
@@ -243,13 +400,20 @@ void setup() {
 
   // threadings start.
   threadingsInit();
+
+  // NEW: by Z. Huang, initialize the magnetometer
+  myIMU.setMagOpMode(AK09916_CONT_MODE_20HZ);
+
+  // NEW: by Z. Huang, activate new thread for detecting whether to send IMU data
+  xTaskCreate(&sendIMU2Rpi, "send_IMU_data", 4000, NULL, 4, &handle_send_IMU_data);
+
 }
 
 
 // main loop.
 void loop() {
   robotCtrl();
-  allDataUpdate();
+  allDataUpdate();  // fresh the screen
   wireDebugDetect();
 }
 

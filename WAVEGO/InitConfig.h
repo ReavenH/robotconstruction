@@ -53,6 +53,11 @@ float ACC_X;
 float ACC_Y;
 float ACC_Z;
 
+// NEW by Z. Huang: store the new IMU values
+float MAG_X, MAG_Y, MAG_Z, GYR_X, GYR_Y, GYR_Z, pitch_default, roll_default;
+// NEW by Z. Huang: store the current and previous time stamps
+float previous_time_stamp = micros(), delta_time = 0.0;
+
 ICM20948_WE myIMU = ICM20948_WE(ICM20948_ADDR);
 
 void InitICM20948(){
@@ -65,6 +70,10 @@ void InitICM20948(){
   // Serial.println("Position your ICM20948 flat and don't move it - calibrating...");
   myIMU.init();
   delay(200);
+  // NEW: Z. Huang, init Magnetometer
+  myIMU.initMagnetometer();
+  delay(200);
+  
   myIMU.autoOffsets();
   // Serial.println("Done!"); 
 
@@ -73,15 +82,40 @@ void InitICM20948(){
   myIMU.setAccSampleRateDivider(10);
 }
 
-void accXYZUpdate(){
+void accXYZUpdate(bool default_pitch_roll = false){
   myIMU.readSensor();
-  xyzFloat accRaw = myIMU.getAccRawValues();
+  // NEW by Z. Huang: read the current time stamp and store the old value
+  delta_time = (micros() - previous_time_stamp)/1000000.;  // transform to seconds
+  previous_time_stamp = micros();
+  // xyzFloat accRaw = myIMU.getAccRawValues();  // COMMENTED BY Z. Huang
   xyzFloat corrAccRaw = myIMU.getCorrectedAccRawValues();
-  xyzFloat gVal = myIMU.getGValues();
+  // xyzFloat gVal = myIMU.getGValues();  // COMMENTED BY Z. Huang
+  // NEW by Z. Huang: read new corrected Gyro values.
+  xyzFloat corrGyrRaw = myIMU.getCorrectedGyrRawValues();
+  // NEW by Z. Huang: read new raw magnetometer values.
+  xyzFloat magRaw = myIMU.getMagValues();
+  // NEW by Z. Huang: calculate the pitch and roll by default
+  if(default_pitch_roll == true){
+    pitch_default = myIMU.getPitch();
+    roll_default = myIMU.getRoll();
+  }
+  else{
+    pitch_default = NULL;
+    roll_default = NULL;
+  }
 
   ACC_X = corrAccRaw.x;
   ACC_Y = corrAccRaw.y;
   ACC_Z = corrAccRaw.z;
+
+  // NEW by Z. Huang: store the new additional values into global variables
+  GYR_X = corrGyrRaw.x;
+  GYR_Y = corrGyrRaw.y;
+  GYR_Z = corrGyrRaw.z;
+  MAG_X = magRaw.x;
+  MAG_Y = magRaw.y;
+  MAG_Z = magRaw.z;
+
 }
 
 
